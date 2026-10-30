@@ -37,7 +37,7 @@ THEOS_LAYOUT_DIR_NAME := packaging/layout
 # every goal is a host-side check (test*, check-exports with explicit paths,
 # conformance). Everything below that needs Theos-native variables is guarded
 # the same way.
-HK_HOST_ONLY_GOALS = test test-legacy-bridge test-native-write test-reloc test-swift-abi test-swift-engine \
+HK_HOST_ONLY_GOALS = test test-deb-ownership test-legacy-bridge test-native-write test-reloc test-swift-abi test-swift-engine \
 	test-header-compile test-shadow-manifest test-provider-evidence \
 	test-runtime-lifecycle test-plan-lifecycle test-hook-add \
 	test-plan-analyze test-engine-registry test-backend-policy \
@@ -876,3 +876,13 @@ device-bench: check-device-canonical-toolchain
 
 bench-instruments: device-bench
 	$(ECHO_NOTHING)bash $(CURDIR)/tools/bench/run_instruments.sh $(INSTRUMENTS_DEVICE) $(BENCH_ARGS)$(ECHO_END)
+
+# Keep the numeric identities in release archives independent of the build user.
+after-package::
+	python3 "$(THEOS_PROJECT_DIR)/tools/release/normalize-deb-ownership.py" "$(__THEOS_LAST_PACKAGE_FILENAME)"
+
+test-deb-ownership:
+	python3 tests/test_deb_ownership.py
+
+.PHONY: test-deb-ownership
+test: test-deb-ownership
