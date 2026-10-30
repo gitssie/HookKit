@@ -17,6 +17,8 @@ typedef int vm_prot_t;
 typedef unsigned mach_msg_type_number_t;
 typedef struct { vm_prot_t protection; } vm_region_basic_info_data_64_t;
 typedef vm_region_basic_info_data_64_t *vm_region_info_t;
+typedef struct { vm_prot_t protection; int is_submap; } vm_region_submap_info_data_64_t;
+typedef vm_region_submap_info_data_64_t *vm_region_recurse_info_t;
 #define FALSE 0
 #define KERN_SUCCESS 0
 #define KERN_INVALID_ADDRESS 1
@@ -28,6 +30,7 @@ typedef vm_region_basic_info_data_64_t *vm_region_info_t;
 #define VM_PROT_COPY 16
 #define VM_REGION_BASIC_INFO_64 0
 #define VM_REGION_BASIC_INFO_COUNT_64 1
+#define VM_REGION_SUBMAP_INFO_COUNT_64 2
 #define VM_FLAGS_ANYWHERE 1
 #define VM_FLAGS_FIXED 0
 #define VM_FLAGS_OVERWRITE 2
@@ -37,6 +40,7 @@ typedef vm_region_basic_info_data_64_t *vm_region_info_t;
 #define mach_task_self() 1
 // Keep fixture functions from interposing on host system-library VM calls.
 #define vm_region_64 hk_test_vm_region_64
+#define vm_region_recurse_64 hk_test_vm_region_recurse_64
 #define mach_port_deallocate hk_test_mach_port_deallocate
 #define vm_protect hk_test_vm_protect
 #define vm_allocate hk_test_vm_allocate
@@ -44,6 +48,8 @@ typedef vm_region_basic_info_data_64_t *vm_region_info_t;
 #define vm_remap hk_test_vm_remap
 kern_return_t vm_region_64(mach_port_t, vm_address_t *, vm_size_t *, int,
                            vm_region_info_t, mach_msg_type_number_t *, mach_port_t *);
+kern_return_t vm_region_recurse_64(mach_port_t, vm_address_t *, vm_size_t *, unsigned *,
+                                  vm_region_recurse_info_t, mach_msg_type_number_t *);
 kern_return_t mach_port_deallocate(mach_port_t, mach_port_t);
 kern_return_t vm_protect(mach_port_t, vm_address_t, vm_size_t, int, vm_prot_t);
 kern_return_t vm_allocate(mach_port_t, vm_address_t *, vm_size_t, int);

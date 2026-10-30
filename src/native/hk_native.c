@@ -62,8 +62,8 @@ static bool hk_range_bounds(const void *addr, size_t len, vm_address_t *start, v
 
 // One-region memo for the probe walks. A single inline hook probes the same
 // code region 6-12 times (basic checks, window scan, the engine's own
-// preflight re-probing the same addresses), and each probe is a vm_region_64
-// trap plus a port deallocate — the dominant per-hook cost on the inline
+// preflight re-probing the same addresses), and each probe is a recursive region
+// query — the dominant per-hook cost on the inline
 // paths. A probe fully inside the memoized region with the needed bits
 // granted skips the trap entirely; a walk refreshes the memo.
 //
@@ -86,6 +86,30 @@ static _Thread_local struct {
     bool valid;
 } hk_memo_region;
 
+// Submap containers do not describe the permissions of their leaf mappings.
+static kern_return_t hk_leaf_region(vm_address_t address, vm_address_t *region,
+                                    vm_size_t *size, vm_prot_t *protection) {
+    unsigned depth = 0;
+    for (unsigned level = 0; level < 64; level++) {
+        vm_region_submap_info_data_64_t info;
+        mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+        *region = address;
+        *size = 0;
+        kern_return_t kr = vm_region_recurse_64(mach_task_self(), region, size,
+            &depth, (vm_region_recurse_info_t)&info, &count);
+        if (kr != KERN_SUCCESS) return kr;
+        if (*size == 0 || *region + *size <= *region ||
+            *region + *size <= address) return KERN_INVALID_ADDRESS;
+        if (!info.is_submap) {
+            *protection = info.protection;
+            return KERN_SUCCESS;
+        }
+        if (*region > address) address = *region;
+        depth++;
+    }
+    return KERN_INVALID_ADDRESS;
+}
+
 // True when every VM region covering [start, end) grants ALL of `required`
 // protections. Per-region, not uniform: mixed regions pass as long as each
 // grants the bits (the readable probe's documented contract). start/end are
@@ -100,20 +124,11 @@ static bool hk_range_all_protected(vm_address_t start, vm_address_t end, vm_prot
     while(start < end) {
         vm_address_t region = start;
         vm_size_t region_size = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t object = MACH_PORT_NULL;
-
-        kern_return_t kr = vm_region_64(mach_task_self(), &region, &region_size,
-                                        VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
-                                        &count, &object);
-
-        if(object != MACH_PORT_NULL) {
-            mach_port_deallocate(mach_task_self(), object);
-        }
+        vm_prot_t protection = VM_PROT_NONE;
+        kern_return_t kr = hk_leaf_region(start, &region, &region_size, &protection);
 
         if(kr != KERN_SUCCESS || region > start || region_size == 0
-           || (info.protection & required) != required) {
+           || (protection & required) != required) {
             // Observed a mapping change (unmapped region, or a region that
             // lacks the bits): drop any memoized region so it is never served.
             hk_memo_region.valid = false;
@@ -124,7 +139,7 @@ static bool hk_range_all_protected(vm_address_t start, vm_address_t end, vm_prot
         if(region + region_size >= end) {
             hk_memo_region.base = region;
             hk_memo_region.end = region + region_size;
-            hk_memo_region.protection = info.protection;
+            hk_memo_region.protection = protection;
             hk_memo_region.valid = true;
         }
 
@@ -145,17 +160,8 @@ static bool hk_range_protection(vm_address_t start, vm_address_t end, vm_prot_t 
     while(start < end) {
         vm_address_t region = start;
         vm_size_t region_size = 0;
-        vm_region_basic_info_data_64_t info;
-        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t object = MACH_PORT_NULL;
-
-        kern_return_t kr = vm_region_64(mach_task_self(), &region, &region_size,
-                                        VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info,
-                                        &count, &object);
-
-        if(object != MACH_PORT_NULL) {
-            mach_port_deallocate(mach_task_self(), object);
-        }
+        vm_prot_t protection = VM_PROT_NONE;
+        kern_return_t kr = hk_leaf_region(start, &region, &region_size, &protection);
 
         // A region starting past `start` means the range is unmapped there.
         if(kr != KERN_SUCCESS || region > start || region_size == 0) {
@@ -163,9 +169,9 @@ static bool hk_range_protection(vm_address_t start, vm_address_t end, vm_prot_t 
         }
 
         if(!have) {
-            first = info.protection;
+            first = protection;
             have = true;
-        } else if(info.protection != first) {
+        } else if(protection != first) {
             return false;   // mixed protections: fail closed
         }
 

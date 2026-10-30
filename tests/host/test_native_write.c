@@ -27,6 +27,11 @@ static enum failure failure;
 static unsigned protects, remaps, frees;
 static unsigned restore_failure_call = 2;
 static uintptr_t temporary;
+static bool nested_map;
+static uintptr_t nested_base;
+static unsigned recursive_queries;
+static vm_prot_t second_leaf_protection;
+static vm_prot_t last_protection;
 
 kern_return_t vm_region_64(mach_port_t task, vm_address_t *address,
     vm_size_t *size, int flavor, vm_region_info_t info,
@@ -35,7 +40,34 @@ kern_return_t vm_region_64(mach_port_t task, vm_address_t *address,
     *object = MACH_PORT_NULL;
     *size = (size_t)getpagesize();
     info->protection = VM_PROT_READ | VM_PROT_EXECUTE;
+    if (nested_map) info->protection = VM_PROT_READ;
     return failure == PROBE ? KERN_INVALID_ADDRESS : KERN_SUCCESS;
+}
+kern_return_t vm_region_recurse_64(mach_port_t task, vm_address_t *address,
+    vm_size_t *size, unsigned *depth, vm_region_recurse_info_t info,
+    mach_msg_type_number_t *count) {
+    (void)task;
+    assert(*count == VM_REGION_SUBMAP_INFO_COUNT_64);
+    recursive_queries++;
+    if (failure == PROBE) return KERN_INVALID_ADDRESS;
+    const size_t page = (size_t)getpagesize();
+    *size = page;
+    info->protection = VM_PROT_READ | VM_PROT_EXECUTE;
+    info->is_submap = nested_map && *depth < 2;
+    if (info->is_submap) {
+        *address = nested_base;
+        *size = 3 * page;
+        info->protection = VM_PROT_READ;
+    } else if (nested_map) {
+        assert(*address >= nested_base + page);
+        if (*address >= nested_base + 2 * page) {
+            *address = nested_base + 2 * page;
+            info->protection = second_leaf_protection;
+        } else {
+            *address = nested_base + page;
+        }
+    }
+    return KERN_SUCCESS;
 }
 kern_return_t mach_port_deallocate(mach_port_t task, mach_port_t port) {
     (void)task; (void)port; return KERN_SUCCESS;
@@ -43,6 +75,7 @@ kern_return_t mach_port_deallocate(mach_port_t task, mach_port_t port) {
 kern_return_t vm_protect(mach_port_t task, vm_address_t address, vm_size_t size,
                          int maximum, vm_prot_t protection) {
     (void)task; (void)address; (void)size; (void)maximum; (void)protection;
+    last_protection = protection;
     protects++;
     if ((failure >= ALLOCATE && protects == 1) ||
         (failure == RESTORE && protects == restore_failure_call) ||
@@ -104,6 +137,30 @@ int main(void) {
     uint32_t *target = aligned_alloc((size_t)getpagesize(), (size_t)getpagesize());
     assert(target);
     memset(target, 0, (size_t)getpagesize());
+    // Shared-cache containers may be read-only while their leaf code is RX.
+    failure = OK;
+    nested_map = true;
+    nested_base = (uintptr_t)target - (size_t)getpagesize();
+    second_leaf_protection = VM_PROT_READ;
+    hk_memo_region.valid = false;
+    assert(hk_native_range_executable(target, 4));
+    assert(recursive_queries == 3);
+    vm_prot_t leaf_protection = VM_PROT_NONE;
+    assert(hk_range_protection((uintptr_t)target,
+        (uintptr_t)target + (size_t)getpagesize(), &leaf_protection));
+    assert(leaf_protection == (VM_PROT_READ | VM_PROT_EXECUTE));
+    assert(!hk_range_protection((uintptr_t)target,
+        (uintptr_t)target + 2 * (size_t)getpagesize(), &leaf_protection));
+    hk_memo_region.valid = false;
+    assert(!hk_native_range_executable(target, 2 * (size_t)getpagesize()));
+    assert(hk_native_range_readable(target, 2 * (size_t)getpagesize()));
+    uint32_t leaf_patch = 42;
+    protects = 0;
+    assert(hk_native_patch_memory(target, &leaf_patch, sizeof(leaf_patch)) == HK_MUTATION_COMPLETE);
+    assert(target[0] == leaf_patch && protects == 2);
+    assert(last_protection == (VM_PROT_READ | VM_PROT_EXECUTE));
+    nested_map = false;
+    hk_memo_region.valid = false;
     for (unsigned backing = 0; backing < 2; backing++) {
         bool is_static = backing != 0;
         hk_reloc_engine_ctx_t ctx = {.alloc = alloc_backing, .seal = seal_backing,
